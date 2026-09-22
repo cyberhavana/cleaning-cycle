@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { User } from "@supabase/supabase-js";
+import { getSupabaseBrowserClient } from "../lib/supabase/client";
 
 type Cadence = "daily" | "weekly" | "monthly";
 type Ring = {
@@ -53,6 +55,11 @@ export default function Home() {
   const [customIcon, setCustomIcon] = useState("");
   const [screen, setScreen] = useState<"dial" | "cycles" | "account">("dial");
   const [confirmReset, setConfirmReset] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
   const animationFrame = useRef<number | null>(null);
   const clickAudio = useRef<HTMLAudioElement | null>(null);
 
@@ -69,6 +76,18 @@ export default function Home() {
     return () => { window.removeEventListener("beforeinstallprompt", beforeInstall); window.clearInterval(clock); if (animationFrame.current) window.cancelAnimationFrame(animationFrame.current); };
   }, []);
   useEffect(() => localStorage.setItem("cleaning-cycle-rings", JSON.stringify(rings)), [rings]);
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    void supabase.auth.getUser().then(({ data }) => {
+      setAuthUser(data.user ?? null);
+      setAuthReady(true);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   const animateRotation = (ringIndex: number, from: number, to: number, finished: () => void) => {
     const startedAt = performance.now();
@@ -167,16 +186,39 @@ export default function Home() {
       index: taskIndex < ring.index ? ring.index - 1 : taskIndex === ring.index ? ring.index % remaining.length : ring.index,
     };
   }));
+  const sendMagicLink = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!authEmail.trim() || authBusy) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    const { error } = await getSupabaseBrowserClient().auth.signInWithOtp({
+      email: authEmail.trim(),
+      options: { emailRedirectTo: `${window.location.origin}/`, shouldCreateUser: true },
+    });
+    setAuthMessage(error ? error.message : "Check your email for the sign-in link.");
+    setAuthBusy(false);
+  };
+  const signOut = async () => {
+    if (authBusy) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    const { error } = await getSupabaseBrowserClient().auth.signOut();
+    if (error) setAuthMessage(error.message);
+    setAuthBusy(false);
+  };
 
   const urgency = (ring: Ring) => ring.currentSince && now ? Math.min(1, Math.max(0, (now - ring.currentSince) / cadenceDuration(ring.cadence))) : 0;
   const totalCycles = rings.reduce((total, ring) => total + ring.cycle, 0);
   const weekday = now ? new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(new Date(now)).toUpperCase() : "TODAY";
   const month = now ? new Intl.DateTimeFormat(undefined, { month: "long" }).format(new Date(now)).toUpperCase() : "SEPTEMBER";
+  const accountName = authUser?.user_metadata.display_name || authUser?.user_metadata.full_name || authUser?.email?.split("@")[0] || "Your account";
   if (screen === "account") return <main className="app-shell account-screen">
     <audio ref={clickAudio} src="/click-pen.mp3" preload="auto" />
     <header><button className="back-button" aria-label="Back to dial" onClick={() => setScreen("dial")}>←</button><div><p className="eyebrow">CYCLES</p><h1>My account</h1></div></header>
-    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>Vanda</h2><p>Your tasks and cycles are saved on this device.</p></section>
+    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>{authReady ? authUser ? accountName : "Sign in" : "Checking account"}</h2>{authUser?.email && <p className="account-email">{authUser.email}</p>}<p>Your tasks and cycles are saved on this device.</p></section>
+    {authReady && !authUser && <form className="account-auth" onSubmit={sendMagicLink}><label htmlFor="account-email">EMAIL ADDRESS</label><input id="account-email" type="email" inputMode="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com"/><button disabled={authBusy}>{authBusy ? "SENDING" : "EMAIL ME A SIGN-IN LINK"}</button>{authMessage && <p role="status">{authMessage}</p>}</form>}
     <section className="account-links" aria-label="Account options"><button onClick={() => { setScreen("dial"); setShowEditor(true); }}><span>YOUR TASKS</span><strong>Edit tasks</strong></button><button onClick={() => setScreen("cycles")}><span>CYCLE HISTORY</span><strong>{totalCycles} completed</strong></button></section>
+    {authUser && <div className="account-session"><span>SIGNED IN</span><button onClick={signOut} disabled={authBusy}>{authBusy ? "SIGNING OUT" : "SIGN OUT"}</button>{authMessage && <p role="status">{authMessage}</p>}</div>}
   </main>;
   if (screen === "cycles") return <main className="app-shell cycle-screen">
     <audio ref={clickAudio} src="/click-pen.mp3" preload="auto" />
