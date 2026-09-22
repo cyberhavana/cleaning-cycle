@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cleaning Cycle",
+  title: "Cycles",
   description: "A gentler way to keep house, one task at a time.",
   manifest: "/manifest.webmanifest",
   icons: {
