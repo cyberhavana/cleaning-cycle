@@ -40,6 +40,12 @@ const urgencyColor = (amount: number) => {
     : blend([205, 151, 56], [171, 75, 61], (amount - 0.5) * 2);
   return `rgb(${r} ${g} ${b})`;
 };
+const alignedRotation = (rotation: number, index: number, taskCount: number) => {
+  const target = -(index * 360) / taskCount;
+  const turns = Math.round((rotation - target) / 360);
+  return target + turns * 360;
+};
+const displayNameForUser = (user: User | null) => user?.user_metadata.display_name || user?.user_metadata.full_name || user?.email?.split("@")[0] || "Your account";
 
 export default function Home() {
   const [rings, setRings] = useState<Ring[]>(starter);
@@ -60,39 +66,63 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
+  const [accountNameDraft, setAccountNameDraft] = useState("");
+  const [accountNameMessage, setAccountNameMessage] = useState("");
   const animationFrame = useRef<number | null>(null);
   const clickAudio = useRef<HTMLAudioElement | null>(null);
+  const ringsHydrated = useRef(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("cleaning-cycle-rings");
-    const initialNow = Date.now();
-    if (saved) setRings((JSON.parse(saved) as Ring[]).map((ring) => { const rotation = Number.isFinite(ring.rotation) ? ring.rotation : -(ring.index * 360) / ring.tasks.length; return { ...ring, currentSince: ring.currentSince || initialNow, rotation, previousRotation: rotation }; }));
-    else setRings((current) => current.map((ring) => ({ ...ring, currentSince: initialNow })));
-    setNow(initialNow);
+    const hydrate = window.setTimeout(() => {
+      const initialNow = Date.now();
+      const saved = localStorage.getItem("cleaning-cycle-rings");
+      let hydratedRings = starter.map((ring) => ({ ...ring, currentSince: initialNow }));
+      if (saved) {
+        try {
+          hydratedRings = (JSON.parse(saved) as Ring[]).map((ring) => {
+            const savedRotation = Number.isFinite(ring.rotation) ? ring.rotation : -(ring.index * 360) / ring.tasks.length;
+            const rotation = alignedRotation(savedRotation, ring.index, ring.tasks.length);
+            return { ...ring, currentSince: ring.currentSince || initialNow, rotation, previousRotation: rotation };
+          });
+        } catch {
+          localStorage.removeItem("cleaning-cycle-rings");
+        }
+      }
+      ringsHydrated.current = true;
+      setRings(hydratedRings);
+      setNow(initialNow);
+    }, 0);
     const clock = window.setInterval(() => setNow(Date.now()), 60_000);
     const beforeInstall = (event: Event) => { event.preventDefault(); setInstall(event as BeforeInstallPromptEvent); };
     window.addEventListener("beforeinstallprompt", beforeInstall);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
-    return () => { window.removeEventListener("beforeinstallprompt", beforeInstall); window.clearInterval(clock); if (animationFrame.current) window.cancelAnimationFrame(animationFrame.current); };
+    return () => { window.removeEventListener("beforeinstallprompt", beforeInstall); window.clearTimeout(hydrate); window.clearInterval(clock); if (animationFrame.current) window.cancelAnimationFrame(animationFrame.current); };
   }, []);
-  useEffect(() => localStorage.setItem("cleaning-cycle-rings", JSON.stringify(rings)), [rings]);
+  useEffect(() => {
+    if (ringsHydrated.current) localStorage.setItem("cleaning-cycle-rings", JSON.stringify(rings));
+  }, [rings]);
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
     void supabase.auth.getUser().then(({ data }) => {
-      setAuthUser(data.user ?? null);
+      const user = data.user ?? null;
+      setAuthUser(user);
+      setAccountNameDraft(user ? displayNameForUser(user) : "");
       setAuthReady(true);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setAuthUser(session?.user ?? null);
+      const user = session?.user ?? null;
+      setAuthUser(user);
+      setAccountNameDraft(user ? displayNameForUser(user) : "");
       setAuthReady(true);
     });
     return () => subscription.unsubscribe();
   }, []);
 
   const animateRotation = (ringIndex: number, from: number, to: number, finished: () => void) => {
-    const startedAt = performance.now();
+    let startedAt: number | null = null;
     const duration = 850;
     const step = (timestamp: number) => {
+      startedAt ??= timestamp;
       const progress = Math.min(1, (timestamp - startedAt) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
       setMotion({ ring: ringIndex, rotation: from + (to - from) * eased });
@@ -171,19 +201,24 @@ export default function Home() {
     setConfirmReset(false);
     setScreen("dial");
   };
-  const addTask = () => setRings((current) => current.map((ring, ringIndex) => ringIndex !== editingRing || ring.tasks.length >= 12 ? ring : {
-    ...ring,
-    tasks: [...ring.tasks, { name: "New task", icon: "✦" }],
-    done: [...ring.done, false],
+  const addTask = () => setRings((current) => current.map((ring, ringIndex) => {
+    if (ringIndex !== editingRing || ring.tasks.length >= 12) return ring;
+    const tasks = [...ring.tasks, { name: "New task", icon: "✦" }];
+    const rotation = alignedRotation(ring.rotation, ring.index, tasks.length);
+    return { ...ring, tasks, done: [...ring.done, false], rotation, previousRotation: rotation };
   }));
   const removeTask = (taskIndex: number) => setRings((current) => current.map((ring, ringIndex) => {
     if (ringIndex !== editingRing || ring.tasks.length <= 3) return ring;
     const remaining = ring.tasks.filter((_, index) => index !== taskIndex);
+    const index = taskIndex < ring.index ? ring.index - 1 : taskIndex === ring.index ? ring.index % remaining.length : ring.index;
+    const rotation = alignedRotation(ring.rotation, index, remaining.length);
     return {
       ...ring,
       tasks: remaining,
       done: ring.done.filter((_, index) => index !== taskIndex),
-      index: taskIndex < ring.index ? ring.index - 1 : taskIndex === ring.index ? ring.index % remaining.length : ring.index,
+      index,
+      rotation,
+      previousRotation: rotation,
     };
   }));
   const sendMagicLink = async (event: FormEvent<HTMLFormElement>) => {
@@ -206,16 +241,27 @@ export default function Home() {
     if (error) setAuthMessage(error.message);
     setAuthBusy(false);
   };
+  const saveAccountName = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const displayName = accountNameDraft.trim();
+    if (!displayName || authBusy) return;
+    setAuthBusy(true);
+    setAccountNameMessage("");
+    const { data, error } = await getSupabaseBrowserClient().auth.updateUser({ data: { display_name: displayName } });
+    if (data.user) setAuthUser(data.user);
+    setAccountNameMessage(error ? error.message : "Name saved.");
+    setAuthBusy(false);
+  };
 
   const urgency = (ring: Ring) => ring.currentSince && now ? Math.min(1, Math.max(0, (now - ring.currentSince) / cadenceDuration(ring.cadence))) : 0;
   const totalCycles = rings.reduce((total, ring) => total + ring.cycle, 0);
   const weekday = now ? new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(new Date(now)).toUpperCase() : "TODAY";
   const month = now ? new Intl.DateTimeFormat(undefined, { month: "long" }).format(new Date(now)).toUpperCase() : "SEPTEMBER";
-  const accountName = authUser?.user_metadata.display_name || authUser?.user_metadata.full_name || authUser?.email?.split("@")[0] || "Your account";
+  const accountName = displayNameForUser(authUser);
   if (screen === "account") return <main className="app-shell account-screen">
     <audio ref={clickAudio} src="/click-pen.mp3" preload="auto" />
     <header><button className="back-button" aria-label="Back to dial" onClick={() => setScreen("dial")}>←</button><div><p className="eyebrow">CYCLES</p><h1>My account</h1></div></header>
-    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>{authReady ? authUser ? accountName : "Sign in" : "Checking account"}</h2>{authUser?.email && <p className="account-email">{authUser.email}</p>}<p>Your tasks and cycles are saved on this device.</p></section>
+    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>{authReady ? authUser ? accountName : "Sign in" : "Checking account"}</h2>{authUser?.email && <p className="account-email">{authUser.email}</p>}{authUser && <form className="account-name-form" onSubmit={saveAccountName}><label htmlFor="account-name">YOUR NAME</label><div><input id="account-name" autoComplete="name" maxLength={60} required value={accountNameDraft} onChange={(event) => setAccountNameDraft(event.target.value)} /><button disabled={authBusy || !accountNameDraft.trim()}>{authBusy ? "SAVING" : "SAVE"}</button></div>{accountNameMessage && <p role="status">{accountNameMessage}</p>}</form>}<p>Your tasks and cycles are saved on this device.</p></section>
     {authReady && !authUser && <form className="account-auth" onSubmit={sendMagicLink}><label htmlFor="account-email">EMAIL ADDRESS</label><input id="account-email" type="email" inputMode="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com"/><button disabled={authBusy}>{authBusy ? "SENDING" : "EMAIL ME A SIGN-IN LINK"}</button>{authMessage && <p role="status">{authMessage}</p>}</form>}
     <section className="account-links" aria-label="Account options"><button onClick={() => { setScreen("dial"); setShowEditor(true); }}><span>YOUR TASKS</span><strong>Edit tasks</strong></button><button onClick={() => setScreen("cycles")}><span>CYCLE HISTORY</span><strong>{totalCycles} completed</strong></button></section>
     {authUser && <div className="account-session"><span>SIGNED IN</span><button onClick={signOut} disabled={authBusy}>{authBusy ? "SIGNING OUT" : "SIGN OUT"}</button>{authMessage && <p role="status">{authMessage}</p>}</div>}
@@ -240,8 +286,8 @@ export default function Home() {
         {rings.map((ring, ringIndex) => { const radius = [66, 98, 132][ringIndex]; const well = [11, 12, 13][ringIndex]; const slot = 360 / ring.tasks.length; const [startX, startY] = points(radius, -slot * 0.37); const [endX, endY] = points(radius, slot * 0.37); return <path key={`highlight-${ring.cadence}`} d={`M${startX} ${startY} A${radius} ${radius} 0 0 1 ${endX} ${endY}`} className="due-segment" stroke={urgencyColor(urgency(ring))} strokeWidth={well * 2.2} />; })}
         {rings.map((ring, ringIndex) => { const radius = [66, 98, 132][ringIndex]; const well = [11, 12, 13][ringIndex]; const slot = 360 / ring.tasks.length; const displayRotation = motion?.ring === ringIndex ? motion.rotation : ring.rotation; return <g key={ring.cadence} transform="translate(170 170)"><g className={`ring ring-${ring.cadence} ${rotating === ringIndex ? "spinning" : ""}`} transform={`rotate(${displayRotation})`}>
           <g transform="translate(-170 -170)">
-            <circle r={radius} fill="none" stroke="transparent" strokeWidth={well * 2.2} className="ring-press-area" onClick={() => complete(ringIndex)} />
-            {ring.tasks.map((task, taskIndex) => { const [x, y] = points(radius, taskIndex * slot); return <g key={task.name} transform={`translate(${x} ${y}) rotate(${taskIndex * slot})`} className={`task-well ${taskIndex === ring.index ? "due" : ""}`} onClick={(event) => { event.stopPropagation(); taskIndex === ring.index ? complete(ringIndex) : ring.done[taskIndex] ? restoreTask(ringIndex, taskIndex) : markAhead(ringIndex, taskIndex); }}>
+            <circle cx="170" cy="170" r={radius} fill="none" stroke="transparent" strokeWidth={well * 2.2} className="ring-press-area" onClick={() => complete(ringIndex)} />
+            {ring.tasks.map((task, taskIndex) => { const [x, y] = points(radius, taskIndex * slot); return <g key={task.name} transform={`translate(${x} ${y}) rotate(${taskIndex * slot})`} className={`task-well ${taskIndex === ring.index ? "due" : ""}`} onClick={(event) => { event.stopPropagation(); if (taskIndex === ring.index) complete(ringIndex); else if (ring.done[taskIndex]) restoreTask(ringIndex, taskIndex); else markAhead(ringIndex, taskIndex); }}>
               <circle r={well} className="well"/><text y="5" textAnchor="middle" className="pixel-icon">{task.icon}</text>{ring.done[taskIndex] && <g className="completion"><circle r={well - 2} /><path d="M-5 0 l4 4 l7 -9" /></g>}
             </g>})}
           </g>

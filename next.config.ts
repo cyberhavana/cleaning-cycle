@@ -1,7 +1,11 @@
 import type { NextConfig } from "next";
 
+const isCloudflarePagesBuild = process.env.CLOUDFLARE_PAGES_BUILD === "1";
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  output: isCloudflarePagesBuild ? "export" : undefined,
+  trailingSlash: isCloudflarePagesBuild,
+  images: isCloudflarePagesBuild ? { unoptimized: true } : undefined,
 };
 
 export default nextConfig;

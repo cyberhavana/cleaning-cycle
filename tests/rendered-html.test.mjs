@@ -47,6 +47,8 @@ test("wires passwordless Supabase authentication safely", async () => {
 
   assert.match(page, /signInWithOtp/);
   assert.match(page, /EMAIL ME A SIGN-IN LINK/);
+  assert.match(page, /auth\.updateUser/);
+  assert.match(page, /account-name/);
   assert.match(page, /auth\.signOut\(\)/);
   assert.match(client, /NEXT_PUBLIC_SUPABASE_URL/);
   assert.match(client, /NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY/);
@@ -57,4 +59,28 @@ test("wires passwordless Supabase authentication safely", async () => {
   assert.doesNotMatch(envExample, /service_role|SUPABASE_SECRET_KEY/i);
   assert.match(gitignore, /^\.env\*$/m);
   assert.match(gitignore, /^!\.env\.example$/m);
+});
+
+test("defines the Supabase Cycles data model without persisted rotation", async () => {
+  const migration = await readFile(
+    new URL("../supabase/migrations/20260922211733_create_cycles_data_model.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(migration, /create table public\.profiles/i);
+  assert.match(migration, /user_id uuid primary key references auth\.users \(id\)/i);
+  assert.match(migration, /display_name text not null/i);
+  assert.match(migration, /create table public\.rings/i);
+  assert.match(migration, /cadence in \('daily', 'weekly', 'monthly'\)/i);
+  assert.match(migration, /active_task_position smallint not null/i);
+  assert.match(migration, /cycle_count bigint not null/i);
+  assert.match(migration, /current_since timestamptz not null/i);
+  assert.match(migration, /create table public\.tasks/i);
+  assert.match(migration, /foreign key \(ring_id, user_id\)/i);
+  assert.match(migration, /position smallint not null/i);
+  assert.match(migration, /completed boolean not null default false/i);
+  assert.match(migration, /alter table public\.profiles enable row level security/i);
+  assert.match(migration, /alter table public\.rings enable row level security/i);
+  assert.match(migration, /alter table public\.tasks enable row level security/i);
+  assert.doesNotMatch(migration, /^\s*rotation\s/m);
 });
