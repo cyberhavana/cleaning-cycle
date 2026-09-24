@@ -3,21 +3,20 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import {
+  loadCloudRings,
+  loadOrCreateProfile,
+  normalizeRing,
+  saveCloudRings,
+  saveProfileName,
+  type Cadence,
+  type RingState,
+} from "../lib/supabase/ring-sync";
 
-type Cadence = "daily" | "weekly" | "monthly";
-type Ring = {
-  cadence: Cadence;
-  label: string;
-  tasks: { name: string; icon: string }[];
-  index: number;
-  done: boolean[];
-  cycle: number;
-  tint: "green" | "amber" | "red";
-  currentSince: number;
-  rotation: number;
-  previousRotation: number;
-};
-const starter: Ring[] = [
+const LEGACY_STORAGE_KEY = "cleaning-cycle-rings";
+const userStorageKey = (userId: string) => `${LEGACY_STORAGE_KEY}:${userId}`;
+
+const starter: RingState[] = [
   { cadence: "daily", label: "Daily", tasks: [{ name: "Dishes", icon: "▧" }, { name: "Wipe counters", icon: "✦" }, { name: "Sweep kitchen", icon: "⌁" }, { name: "Make beds", icon: "▤" }, { name: "Tidy lounge", icon: "⌂" }, { name: "Empty bins", icon: "▱" }], index: 0, done: Array(6).fill(false), cycle: 12, tint: "green", currentSince: 0, rotation: 0, previousRotation: 0 },
   { cadence: "weekly", label: "Weekly", tasks: [{ name: "Vacuum", icon: "≋" }, { name: "Mop floors", icon: "♒" }, { name: "Clean bathroom", icon: "▦" }, { name: "Change sheets", icon: "▤" }, { name: "Dust surfaces", icon: "✧" }, { name: "Clean mirrors", icon: "▯" }, { name: "Laundry towels", icon: "≋" }], index: 2, done: [true, true, false, false, false, false, false], cycle: 5, tint: "amber", currentSince: 0, rotation: -(2 * 360) / 7, previousRotation: -(2 * 360) / 7 },
   { cadence: "monthly", label: "Monthly", tasks: [{ name: "Clean oven", icon: "▣" }, { name: "Wash windows", icon: "▯" }, { name: "Descale kettle", icon: "♨" }, { name: "Clean fridge", icon: "▤" }, { name: "Wipe skirting", icon: "⌁" }, { name: "Flip mattress", icon: "▰" }, { name: "Clean vents", icon: "▦" }, { name: "Wash curtains", icon: "≋" }], index: 4, done: [true, true, true, true, false, false, false, false], cycle: 2, tint: "red", currentSince: 0, rotation: -180, previousRotation: -180 },
@@ -46,9 +45,20 @@ const alignedRotation = (rotation: number, index: number, taskCount: number) => 
   return target + turns * 360;
 };
 const displayNameForUser = (user: User | null) => user?.user_metadata.display_name || user?.user_metadata.full_name || user?.email?.split("@")[0] || "Your account";
+const initialRings = (initialNow: number) => starter.map((ring) => normalizeRing({ ...ring, currentSince: initialNow }));
+const storedRings = (serialized: string | null, initialNow: number) => {
+  if (!serialized) return null;
+  try {
+    const parsed = JSON.parse(serialized) as RingState[];
+    if (!Array.isArray(parsed) || parsed.length !== starter.length) return null;
+    return parsed.map((ring) => normalizeRing({ ...ring, currentSince: ring.currentSince || initialNow }));
+  } catch {
+    return null;
+  }
+};
 
 export default function Home() {
-  const [rings, setRings] = useState<Ring[]>(starter);
+  const [rings, setRings] = useState<RingState[]>(starter);
   const [open, setOpen] = useState<number | null>(null);
   const [rotating, setRotating] = useState<number | null>(null);
   const [install, setInstall] = useState<BeforeInstallPromptEvent | null>(null);
@@ -68,29 +78,31 @@ export default function Home() {
   const [authMessage, setAuthMessage] = useState("");
   const [accountNameDraft, setAccountNameDraft] = useState("");
   const [accountNameMessage, setAccountNameMessage] = useState("");
+  const [localReady, setLocalReady] = useState(false);
+  const [syncReady, setSyncReady] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"device" | "loading" | "saving" | "synced" | "error">("device");
+  const [syncMessage, setSyncMessage] = useState("");
   const animationFrame = useRef<number | null>(null);
   const clickAudio = useRef<HTMLAudioElement | null>(null);
   const ringsHydrated = useRef(false);
+  const ringsRef = useRef<RingState[]>(starter);
+  const syncUserRef = useRef<string | null>(null);
+  const authNameRef = useRef("Your account");
+  const saveTimer = useRef<number | null>(null);
+  const authUserId = authUser?.id ?? null;
 
   useEffect(() => {
     const hydrate = window.setTimeout(() => {
       const initialNow = Date.now();
-      const saved = localStorage.getItem("cleaning-cycle-rings");
-      let hydratedRings = starter.map((ring) => ({ ...ring, currentSince: initialNow }));
-      if (saved) {
-        try {
-          hydratedRings = (JSON.parse(saved) as Ring[]).map((ring) => {
-            const savedRotation = Number.isFinite(ring.rotation) ? ring.rotation : -(ring.index * 360) / ring.tasks.length;
-            const rotation = alignedRotation(savedRotation, ring.index, ring.tasks.length);
-            return { ...ring, currentSince: ring.currentSince || initialNow, rotation, previousRotation: rotation };
-          });
-        } catch {
-          localStorage.removeItem("cleaning-cycle-rings");
-        }
-      }
+      const serialized = localStorage.getItem(LEGACY_STORAGE_KEY);
+      const savedRings = storedRings(serialized, initialNow);
+      const hydratedRings = savedRings || initialRings(initialNow);
+      if (serialized && !savedRings) localStorage.removeItem(LEGACY_STORAGE_KEY);
       ringsHydrated.current = true;
+      ringsRef.current = hydratedRings;
       setRings(hydratedRings);
       setNow(initialNow);
+      setLocalReady(true);
     }, 0);
     const clock = window.setInterval(() => setNow(Date.now()), 60_000);
     const beforeInstall = (event: Event) => { event.preventDefault(); setInstall(event as BeforeInstallPromptEvent); };
@@ -99,24 +111,103 @@ export default function Home() {
     return () => { window.removeEventListener("beforeinstallprompt", beforeInstall); window.clearTimeout(hydrate); window.clearInterval(clock); if (animationFrame.current) window.cancelAnimationFrame(animationFrame.current); };
   }, []);
   useEffect(() => {
-    if (ringsHydrated.current) localStorage.setItem("cleaning-cycle-rings", JSON.stringify(rings));
-  }, [rings]);
+    ringsRef.current = rings;
+    if (!ringsHydrated.current) return;
+    if (!authUserId) localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(rings));
+    else if (syncReady && syncUserRef.current === authUserId) {
+      localStorage.setItem(userStorageKey(authUserId), JSON.stringify(rings));
+    }
+  }, [authUserId, rings, syncReady]);
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
-    void supabase.auth.getUser().then(({ data }) => {
-      const user = data.user ?? null;
+    const applyUser = (user: User | null) => {
+      authNameRef.current = user ? displayNameForUser(user) : "Your account";
+      if (!user) {
+        const resetRings = initialRings(Date.now());
+        syncUserRef.current = null;
+        setSyncReady(false);
+        setSyncStatus("device");
+        setSyncMessage("");
+        setRings(resetRings);
+      }
       setAuthUser(user);
       setAccountNameDraft(user ? displayNameForUser(user) : "");
       setAuthReady(true);
+    };
+    void supabase.auth.getUser().then(({ data }) => {
+      applyUser(data.user ?? null);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      const user = session?.user ?? null;
-      setAuthUser(user);
-      setAccountNameDraft(user ? displayNameForUser(user) : "");
-      setAuthReady(true);
+      applyUser(session?.user ?? null);
     });
     return () => subscription.unsubscribe();
   }, []);
+  useEffect(() => {
+    if (!authUserId || !localReady) return;
+    let cancelled = false;
+    const start = window.setTimeout(() => {
+      void (async () => {
+        setSyncReady(false);
+        setSyncStatus("loading");
+        setSyncMessage("");
+        try {
+          const client = getSupabaseBrowserClient();
+          const cached = storedRings(localStorage.getItem(userStorageKey(authUserId)), Date.now());
+          const deviceRings = cached || ringsRef.current.map(normalizeRing);
+          if (cached && !cancelled) setRings(cached);
+
+          const [profileName, cloudRings] = await Promise.all([
+            loadOrCreateProfile(client, authUserId, authNameRef.current),
+            loadCloudRings(client, authUserId, deviceRings),
+          ]);
+          let syncedRings = cloudRings;
+          if (!syncedRings) {
+            await saveCloudRings(client, authUserId, deviceRings);
+            syncedRings = deviceRings.map(normalizeRing);
+            localStorage.removeItem(LEGACY_STORAGE_KEY);
+          }
+          if (cancelled) return;
+          syncUserRef.current = authUserId;
+          ringsRef.current = syncedRings;
+          setAccountNameDraft(profileName);
+          setRings(syncedRings);
+          setSyncReady(true);
+          setSyncStatus("synced");
+        } catch (error) {
+          if (cancelled) return;
+          setSyncReady(false);
+          setSyncStatus("error");
+          setSyncMessage(error instanceof Error ? error.message : "Cloud sync failed.");
+        }
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(start);
+    };
+  }, [authUserId, localReady]);
+  useEffect(() => {
+    if (!authUserId || !syncReady || syncUserRef.current !== authUserId) return;
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      setSyncStatus("saving");
+      void saveCloudRings(getSupabaseBrowserClient(), authUserId, rings)
+        .then(() => {
+          if (syncUserRef.current !== authUserId) return;
+          localStorage.setItem(userStorageKey(authUserId), JSON.stringify(rings));
+          setSyncStatus("synced");
+          setSyncMessage("");
+        })
+        .catch((error: unknown) => {
+          if (syncUserRef.current !== authUserId) return;
+          setSyncStatus("error");
+          setSyncMessage(error instanceof Error ? error.message : "Cloud save failed.");
+        });
+    }, 1_200);
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [authUserId, rings, syncReady]);
 
   const animateRotation = (ringIndex: number, from: number, to: number, finished: () => void) => {
     let startedAt: number | null = null;
@@ -235,10 +326,12 @@ export default function Home() {
   };
   const signOut = async () => {
     if (authBusy) return;
+    const signedOutUserId = authUser?.id;
     setAuthBusy(true);
     setAuthMessage("");
     const { error } = await getSupabaseBrowserClient().auth.signOut();
     if (error) setAuthMessage(error.message);
+    else if (signedOutUserId) localStorage.removeItem(userStorageKey(signedOutUserId));
     setAuthBusy(false);
   };
   const saveAccountName = async (event: FormEvent<HTMLFormElement>) => {
@@ -247,21 +340,41 @@ export default function Home() {
     if (!displayName || authBusy) return;
     setAuthBusy(true);
     setAccountNameMessage("");
-    const { data, error } = await getSupabaseBrowserClient().auth.updateUser({ data: { display_name: displayName } });
+    const client = getSupabaseBrowserClient();
+    const { data, error } = await client.auth.updateUser({ data: { display_name: displayName } });
     if (data.user) setAuthUser(data.user);
-    setAccountNameMessage(error ? error.message : "Name saved.");
+    if (error || !authUser) {
+      setAccountNameMessage(error?.message || "Sign in before saving your name.");
+    } else {
+      try {
+        await saveProfileName(client, authUser.id, displayName);
+        authNameRef.current = displayName;
+        setAccountNameMessage("Name saved.");
+      } catch (profileError) {
+        setAccountNameMessage(profileError instanceof Error ? profileError.message : "Could not save your profile.");
+      }
+    }
     setAuthBusy(false);
   };
 
-  const urgency = (ring: Ring) => ring.currentSince && now ? Math.min(1, Math.max(0, (now - ring.currentSince) / cadenceDuration(ring.cadence))) : 0;
+  const urgency = (ring: RingState) => ring.currentSince && now ? Math.min(1, Math.max(0, (now - ring.currentSince) / cadenceDuration(ring.cadence))) : 0;
   const totalCycles = rings.reduce((total, ring) => total + ring.cycle, 0);
   const weekday = now ? new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(new Date(now)).toUpperCase() : "TODAY";
   const month = now ? new Intl.DateTimeFormat(undefined, { month: "long" }).format(new Date(now)).toUpperCase() : "SEPTEMBER";
-  const accountName = displayNameForUser(authUser);
+  const accountName = accountNameDraft.trim() || displayNameForUser(authUser);
+  const accountStorageMessage = !authUser
+    ? "Your tasks and cycles are saved on this device."
+    : syncStatus === "loading"
+      ? "Loading your synced tasks and cycles."
+      : syncStatus === "saving"
+        ? "Saving your latest changes."
+        : syncStatus === "error"
+          ? `Cloud sync error: ${syncMessage}`
+          : "Your tasks and cycles are synced to your account.";
   if (screen === "account") return <main className="app-shell account-screen">
     <audio ref={clickAudio} src="/click-pen.mp3" preload="auto" />
     <header><button className="back-button" aria-label="Back to dial" onClick={() => setScreen("dial")}>←</button><div><p className="eyebrow">CYCLES</p><h1>My account</h1></div></header>
-    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>{authReady ? authUser ? accountName : "Sign in" : "Checking account"}</h2>{authUser?.email && <p className="account-email">{authUser.email}</p>}{authUser && <form className="account-name-form" onSubmit={saveAccountName}><label htmlFor="account-name">YOUR NAME</label><div><input id="account-name" autoComplete="name" maxLength={60} required value={accountNameDraft} onChange={(event) => setAccountNameDraft(event.target.value)} /><button disabled={authBusy || !accountNameDraft.trim()}>{authBusy ? "SAVING" : "SAVE"}</button></div>{accountNameMessage && <p role="status">{accountNameMessage}</p>}</form>}<p>Your tasks and cycles are saved on this device.</p></section>
+    <section className="account-card"><p className="eyebrow">ABOUT YOU</p><h2>{authReady ? authUser ? accountName : "Sign in" : "Checking account"}</h2>{authUser?.email && <p className="account-email">{authUser.email}</p>}{authUser && <form className="account-name-form" onSubmit={saveAccountName}><label htmlFor="account-name">YOUR NAME</label><div><input id="account-name" autoComplete="name" maxLength={60} required value={accountNameDraft} onChange={(event) => setAccountNameDraft(event.target.value)} /><button disabled={authBusy || !accountNameDraft.trim()}>{authBusy ? "SAVING" : "SAVE"}</button></div>{accountNameMessage && <p role="status">{accountNameMessage}</p>}</form>}<p role="status">{accountStorageMessage}</p></section>
     {authReady && !authUser && <form className="account-auth" onSubmit={sendMagicLink}><label htmlFor="account-email">EMAIL ADDRESS</label><input id="account-email" type="email" inputMode="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com"/><button disabled={authBusy}>{authBusy ? "SENDING" : "EMAIL ME A SIGN-IN LINK"}</button>{authMessage && <p role="status">{authMessage}</p>}</form>}
     <section className="account-links" aria-label="Account options"><button onClick={() => { setScreen("dial"); setShowEditor(true); }}><span>YOUR TASKS</span><strong>Edit tasks</strong></button><button onClick={() => setScreen("cycles")}><span>CYCLE HISTORY</span><strong>{totalCycles} completed</strong></button></section>
     {authUser && <div className="account-session"><span>SIGNED IN</span><button onClick={signOut} disabled={authBusy}>{authBusy ? "SIGNING OUT" : "SIGN OUT"}</button>{authMessage && <p role="status">{authMessage}</p>}</div>}

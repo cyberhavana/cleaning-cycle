@@ -84,3 +84,28 @@ test("defines the Supabase Cycles data model without persisted rotation", async 
   assert.match(migration, /alter table public\.tasks enable row level security/i);
   assert.doesNotMatch(migration, /^\s*rotation\s/m);
 });
+
+test("syncs profiles, rings, and tasks without persisting visual rotation", async () => {
+  const [page, sync] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/supabase/ring-sync.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /loadOrCreateProfile\(/);
+  assert.match(page, /loadCloudRings\(/);
+  assert.match(page, /saveCloudRings\(/);
+  assert.match(page, /saveProfileName\(/);
+  assert.match(page, /`\$\{LEGACY_STORAGE_KEY\}:\$\{userId\}`/);
+  assert.match(page, /Your tasks and cycles are synced to your account\./);
+  assert.match(page, /localStorage\.removeItem\(LEGACY_STORAGE_KEY\)/);
+
+  assert.match(sync, /\.from\("profiles"\)/);
+  assert.match(sync, /\.from\("rings"\)/);
+  assert.match(sync, /\.from\("tasks"\)/);
+  assert.match(sync, /onConflict:\s*"user_id,cadence"/);
+  assert.match(sync, /onConflict:\s*"ring_id,position"/);
+  assert.match(sync, /tasks:tasks!tasks_ring_owner_fkey/);
+  assert.match(sync, /const rotation = normalizedRotation\(index, taskCount\)/);
+  assert.doesNotMatch(sync, /\brotation:\s*ring\.rotation\b/);
+  assert.doesNotMatch(sync, /\bprevious_rotation\b/);
+});
