@@ -109,3 +109,10 @@ test("syncs profiles, rings, and tasks without persisting visual rotation", asyn
   assert.doesNotMatch(sync, /\brotation:\s*ring\.rotation\b/);
   assert.doesNotMatch(sync, /\bprevious_rotation\b/);
 });
+
+test("keeps task-name inputs mounted while their values change", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /key=\{`\$\{rings\[editingRing\]\.cadence\}-\$\{index\}`\}/);
+  assert.doesNotMatch(page, /key=\{`\$\{task\.name\}-\$\{index\}`\}/);
+});
