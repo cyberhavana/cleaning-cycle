@@ -31,7 +31,8 @@ test("server-renders the Cycles dial", async () => {
   const html = await response.text();
   assert.match(html, /<title>Cycles<\/title>/i);
   assert.match(html, /LIFE GOES AROUND/);
-  assert.match(html, /Three rotating cleaning task rings/);
+  assert.match(html, /Choose a cycle/);
+  assert.match(html, /Daily cleaning task wheel/);
   assert.match(html, /Press a task to complete/);
   assert.doesNotMatch(html, /codex-preview|Building your site|react-loading-skeleton/i);
 });
@@ -115,4 +116,28 @@ test("keeps task-name inputs mounted while their values change", async () => {
 
   assert.match(page, /key=\{`\$\{rings\[editingRing\]\.cadence\}-\$\{index\}`\}/);
   assert.doesNotMatch(page, /key=\{`\$\{task\.name\}-\$\{index\}`\}/);
+});
+
+test("prevents iOS from auto-zooming editable fields", async () => {
+  const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(styles, /\.editor-row input\{[^}]*font:16px/);
+  assert.match(styles, /\.custom-icon input\{[^}]*font:16px/);
+  assert.match(styles, /\.account-auth input\{[^}]*font:16px/);
+  assert.match(styles, /\.account-name-form input\{[^}]*font:16px/);
+});
+
+test("splits the dial into selectable cycle wheels while retaining sans-serif type", async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /aria-label="Choose a cycle"/);
+  assert.match(page, /const \[selectedRing, setSelectedRing\]/);
+  assert.match(page, /ROUND \{activeRing\.cycle\}/);
+  assert.match(page, /activeRing\.tasks\.map/);
+  assert.doesNotMatch(page, /Three rotating cleaning task rings/);
+  assert.match(styles, /--sans:"Avenir Next"/);
+  assert.match(styles, /\.single-track\{[^}]*stroke-width:52/);
 });

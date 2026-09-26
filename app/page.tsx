@@ -42,6 +42,35 @@ const points = (r: number, angle: number) => {
   ];
 };
 
+const annularSector = (innerRadius: number, outerRadius: number, halfAngle: number) => {
+  const [outerStartX, outerStartY] = points(outerRadius, -halfAngle);
+  const [outerEndX, outerEndY] = points(outerRadius, halfAngle);
+  const [innerEndX, innerEndY] = points(innerRadius, halfAngle);
+  const [innerStartX, innerStartY] = points(innerRadius, -halfAngle);
+  return `M${outerStartX} ${outerStartY} A${outerRadius} ${outerRadius} 0 0 1 ${outerEndX} ${outerEndY} L${innerEndX} ${innerEndY} A${innerRadius} ${innerRadius} 0 0 0 ${innerStartX} ${innerStartY} Z`;
+};
+
+const dialPalettes = [
+  { case: "#a9c9b6", tick: "#759886", tab: "#d8e8de" },
+  { case: "#c6b6d6", tick: "#927fa7", tab: "#e6dcf0" },
+  { case: "#dfbd99", tick: "#ad8159", tab: "#f2dfca" },
+];
+
+const splitTaskName = (name: string) => {
+  if (name.length <= 13 || !name.includes(" ")) return [name];
+  const words = name.split(" ");
+  const splitAt = Math.ceil(words.length / 2);
+  return [words.slice(0, splitAt).join(" "), words.slice(splitAt).join(" ")];
+};
+
+const isoWeek = (timestamp: number) => {
+  const local = new Date(timestamp);
+  const date = new Date(Date.UTC(local.getFullYear(), local.getMonth(), local.getDate()));
+  date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  return Math.ceil((((date.getTime() - yearStart.getTime()) / 86_400_000) + 1) / 7);
+};
+
 const cadenceDuration = (cadence: Cadence) => ({ daily: 86_400_000, weekly: 604_800_000, monthly: 2_592_000_000 })[cadence];
 const blend = (from: number[], to: number[], amount: number) => from.map((value, index) => Math.round(value + (to[index] - value) * amount));
 const urgencyColor = (amount: number) => {
@@ -76,6 +105,7 @@ export default function Home() {
   const [showInstall, setShowInstall] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
   const [editingRing, setEditingRing] = useState(0);
+  const [selectedRing, setSelectedRing] = useState(0);
   const [now, setNow] = useState(0);
   const [motion, setMotion] = useState<{ ring: number; rotation: number } | null>(null);
   const [pickingIcon, setPickingIcon] = useState<number | null>(null);
@@ -372,6 +402,15 @@ export default function Home() {
   const totalCycles = rings.reduce((total, ring) => total + ring.cycle, 0);
   const weekday = now ? new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(new Date(now)).toUpperCase() : "TODAY";
   const month = now ? new Intl.DateTimeFormat(undefined, { month: "long" }).format(new Date(now)).toUpperCase() : "SEPTEMBER";
+  const activeRing = rings[selectedRing];
+  const activeTask = activeRing.tasks[activeRing.index];
+  const activeTaskLines = splitTaskName(activeTask.name);
+  const activeSlot = 360 / activeRing.tasks.length;
+  const activeRadius = 114;
+  const activeWell = 22;
+  const activeRotation = motion?.ring === selectedRing ? motion.rotation : activeRing.rotation;
+  const activePalette = dialPalettes[selectedRing];
+  const activePeriod = activeRing.cadence === "daily" ? weekday : activeRing.cadence === "monthly" ? month : now ? `WEEK ${isoWeek(now)}` : "THIS WEEK";
   const accountName = accountNameDraft.trim() || displayNameForUser(authUser);
   const accountStorageMessage = !authUser
     ? "Your tasks and cycles are saved on this device."
@@ -401,37 +440,45 @@ export default function Home() {
     <audio ref={clickAudio} src="/click-pen.mp3" preload="auto" />
     <header><div><p className="eyebrow">LIFE GOES AROUND</p><h1>Cycles</h1></div><button className="icon-button" aria-label="Open my account" onClick={() => setScreen("account")}>☼</button></header>
     <section className="dial-card" aria-label="Cleaning task dial">
-      <div className="case-label">{month}</div>
-      <svg viewBox="0 0 340 340" className="dial" role="img" aria-label="Three rotating cleaning task rings">
-        <circle cx="170" cy="170" r="168" className="case"/><circle cx="170" cy="170" r="161" className="case-line"/>
-        {Array.from({ length: 60 }, (_, i) => { if (i === 0) return null; const a = points(157, i * 6), b = points(i % 5 ? 153 : 150, i * 6); return <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className="tick"/>; })}
-        <path d="M166 11 H174 L170 18 Z" className="north-marker" />
-        <circle cx="170" cy="170" r="152" className="face"/><circle cx="170" cy="170" r="132" className="outer-track"/><circle cx="170" cy="170" r="98" className="mid-track"/><circle cx="170" cy="170" r="66" className="inner-track"/>
-        {rings.map((ring, ringIndex) => { const radius = [66, 98, 132][ringIndex]; const well = [11, 12, 13][ringIndex]; const slot = 360 / ring.tasks.length; const [startX, startY] = points(radius, -slot * 0.37); const [endX, endY] = points(radius, slot * 0.37); return <path key={`highlight-${ring.cadence}`} d={`M${startX} ${startY} A${radius} ${radius} 0 0 1 ${endX} ${endY}`} className="due-segment" stroke={urgencyColor(urgency(ring))} strokeWidth={well * 2.2} />; })}
-        {rings.map((ring, ringIndex) => { const radius = [66, 98, 132][ringIndex]; const well = [11, 12, 13][ringIndex]; const slot = 360 / ring.tasks.length; const displayRotation = motion?.ring === ringIndex ? motion.rotation : ring.rotation; return <g key={ring.cadence} transform="translate(170 170)"><g className={`ring ring-${ring.cadence} ${rotating === ringIndex ? "spinning" : ""}`} transform={`rotate(${displayRotation})`}>
+      <div className="dial-tabs" role="tablist" aria-label="Choose a cycle">
+        {rings.map((ring, ringIndex) => <button key={ring.cadence} type="button" role="tab" aria-selected={selectedRing === ringIndex} className={selectedRing === ringIndex ? "selected" : ""} style={selectedRing === ringIndex ? { backgroundColor: dialPalettes[ringIndex].tab } : undefined} onClick={() => setSelectedRing(ringIndex)}><span style={{ backgroundColor: urgencyColor(urgency(ring)) }} />{ring.label}</button>)}
+      </div>
+      <svg viewBox="0 0 340 340" className="dial split-dial" role="img" aria-label={`${activeRing.label} cleaning task wheel`}>
+        <circle cx="170" cy="170" r="168" className="case" style={{ fill: activePalette.case, stroke: activePalette.tick }}/><circle cx="170" cy="170" r="161" className="case-line"/>
+        {Array.from({ length: 60 }, (_, i) => { if (i === 0) return null; const a = points(157, i * 6), b = points(i % 5 ? 153 : 150, i * 6); return <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className="tick" style={{ stroke: activePalette.tick }}/>; })}
+        <path d="M166 11 H174 L170 18 Z" className="north-marker" style={{ fill: activePalette.tick }} />
+        <circle cx="170" cy="170" r="146" className="face"/><circle cx="170" cy="170" r="110" className="single-track"/>
+        <path d={annularSector(82, 144, Math.min(23, activeSlot * 0.38))} className="due-window" fill={urgencyColor(urgency(activeRing))}/>
+        <g transform="translate(170 170)"><g className={`ring ring-${activeRing.cadence} ${rotating === selectedRing ? "spinning" : ""}`} transform={`rotate(${activeRotation})`}>
           <g transform="translate(-170 -170)">
-            <circle cx="170" cy="170" r={radius} fill="none" stroke="transparent" strokeWidth={well * 2.2} className="ring-press-area" onClick={() => complete(ringIndex)} />
-            {ring.tasks.map((task, taskIndex) => { const [x, y] = points(radius, taskIndex * slot); return <g key={task.name} transform={`translate(${x} ${y}) rotate(${taskIndex * slot})`} className={`task-well ${taskIndex === ring.index ? "due" : ""}`} onClick={(event) => { event.stopPropagation(); if (taskIndex === ring.index) complete(ringIndex); else if (ring.done[taskIndex]) restoreTask(ringIndex, taskIndex); else markAhead(ringIndex, taskIndex); }}>
-              <circle r={well} className="well"/>{taskArt[task.name] ? <image href={taskArt[task.name]} x={-well + 2} y={-well + 2} width={(well - 2) * 2} height={(well - 2) * 2} /> : <text y="5" textAnchor="middle" className="pixel-icon">{task.icon}</text>}{ring.done[taskIndex] && <g className="completion"><circle r={well - 2} /><path d="M-5 0 l4 4 l7 -9" /></g>}
+            <circle cx="170" cy="170" r={activeRadius} fill="none" stroke="transparent" strokeWidth={activeWell * 2.2} className="ring-press-area" onClick={() => complete(selectedRing)} />
+            {activeRing.tasks.map((task, taskIndex) => { const [x, y] = points(activeRadius, taskIndex * activeSlot); return <g key={`${taskIndex}-${task.name}`} transform={`translate(${x} ${y}) rotate(${taskIndex * activeSlot})`} className={`task-well ${taskIndex === activeRing.index ? "due" : ""}`} onClick={(event) => { event.stopPropagation(); if (taskIndex === activeRing.index) complete(selectedRing); else if (activeRing.done[taskIndex]) restoreTask(selectedRing, taskIndex); else markAhead(selectedRing, taskIndex); }}>
+              <circle r={activeWell} className="well"/>{taskArt[task.name] ? <image href={taskArt[task.name]} x={-activeWell + 4} y={-activeWell + 4} width={(activeWell - 4) * 2} height={(activeWell - 4) * 2} /> : <text y="6" textAnchor="middle" className="pixel-icon split-icon">{task.icon}</text>}{activeRing.done[taskIndex] && <g className="completion"><circle r={activeWell - 3} /><path d="M-7 0 l5 5 l10 -11" /></g>}
             </g>})}
           </g>
-        </g></g>})}
-        <circle cx="170" cy="170" r="48.5" className="brass"/><circle cx="170" cy="170" r="38" className="knob"/>
-        <text x="170" y="175" textAnchor="middle" className="knob-big">{weekday}</text>
+        </g></g>
+        <g className="dial-knob" role="button" tabIndex={0} aria-label={`Complete ${activeTask.name}`} onClick={() => complete(selectedRing)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") complete(selectedRing); }}>
+          <circle cx="170" cy="170" r="76" className="brass"/>
+          {Array.from({ length: 48 }, (_, i) => { const a = points(75, i * 7.5), b = points(69, i * 7.5); return <line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className="knob-tick"/>; })}
+          <circle cx="170" cy="170" r="66" className="knob"/>
+          <text x="170" y="143" textAnchor="middle" className="knob-period" fill={urgencyColor(urgency(activeRing))}>{activePeriod}</text>
+          {activeTaskLines.length === 1 ? <text x="170" y="177" textAnchor="middle" className="knob-task">{activeTaskLines[0]}</text> : <><text x="170" y="169" textAnchor="middle" className="knob-task">{activeTaskLines[0]}</text><text x="170" y="187" textAnchor="middle" className="knob-task">{activeTaskLines[1]}</text></>}
+          <text x="170" y="210" textAnchor="middle" className="knob-round" fill={urgencyColor(urgency(activeRing))}>ROUND {activeRing.cycle} · {activeRing.index + 1} OF {activeRing.tasks.length}</text>
+        </g>
       </svg>
       <p className="tap-hint">Press a task to complete</p>
     </section>
     <section className="tasks" aria-label="Current tasks">
       <div className="section-title"><button onClick={() => setShowEditor(true)}>EDIT TASKS</button></div>
       {rings.map((ring, i) => <div key={ring.cadence} className={`task-row ${open === i ? "expanded" : ""}`}>
-        <button className="row-main" onClick={() => setOpen(open === i ? null : i)}><span className="task-icon" style={{ borderColor: urgencyColor(urgency(ring)) }}><TaskIcon name={ring.tasks[ring.index].name} fallback={ring.tasks[ring.index].icon} /></span><span className="task-copy"><small>{ring.label.toUpperCase()} · {ring.index + 1} OF {ring.tasks.length}</small><strong>{ring.tasks[ring.index].name}</strong></span></button>
+        <button className="row-main" onClick={() => { setSelectedRing(i); setOpen(open === i ? null : i); }}><span className="task-icon" style={{ borderColor: urgencyColor(urgency(ring)) }}><TaskIcon name={ring.tasks[ring.index].name} fallback={ring.tasks[ring.index].icon} /></span><span className="task-copy"><small>{ring.label.toUpperCase()} · {ring.index + 1} OF {ring.tasks.length}</small><strong>{ring.tasks[ring.index].name}</strong></span></button>
         <button className="done" onClick={() => complete(i)}>DONE</button>
         {open === i && <ol>{ring.tasks.map((task, j) => <li key={task.name} className={j === ring.index ? "current" : ring.done[j] ? "finished" : ""}><span>{ring.done[j] ? "✓" : <TaskIcon name={task.name} fallback={task.icon} className="task-art-list" />}</span>{task.name}{j === ring.index && <b>NOW</b>}</li>)}</ol>}
       </div>)}
     </section>
     <footer><button onClick={installApp}>Add to home screen</button><button className="cycle-link" onClick={() => setScreen("cycles")}>Cycle {totalCycles}</button></footer>
     {showInstall && <div className="sheet" onClick={() => setShowInstall(false)}><div onClick={(e) => e.stopPropagation()}><span>INSTALL CYCLES</span><h2>Keep it close at hand.</h2><p>On iPhone, tap Share, then “Add to Home Screen”. On Android, use the install prompt in your browser menu.</p><button onClick={() => setShowInstall(false)}>GOT IT</button></div></div>}
-    {showEditor && <div className="sheet editor-sheet" onClick={() => setShowEditor(false)}><div onClick={(e) => e.stopPropagation()}><div className="editor-head"><span>EDIT YOUR TASKS</span><button aria-label="Close task editor" onClick={() => setShowEditor(false)}>×</button></div><h2>Keep the cycle yours.</h2><div className="ring-tabs">{rings.map((ring, index) => <button key={ring.cadence} className={editingRing === index ? "selected" : ""} onClick={() => { setEditingRing(index); setPickingIcon(null); }}>{ring.label}</button>)}</div><p className="editor-rule">Tap an icon to choose another · {rings[editingRing].tasks.length} of 12 tasks</p><div className="editor-list">{rings[editingRing].tasks.map((task, index) => <div className="editor-task" key={`${rings[editingRing].cadence}-${index}`}><div className="editor-row"><button className="editor-icon" aria-label={`Change icon for ${task.name}`} onClick={() => { setPickingIcon(pickingIcon === index ? null : index); setCustomIcon(""); }}>{task.icon}</button><input aria-label={`${rings[editingRing].label} task ${index + 1}`} maxLength={24} value={task.name} onChange={(event) => updateTaskName(index, event.target.value)} /><button aria-label={`Remove ${task.name}`} disabled={rings[editingRing].tasks.length <= 3} onClick={() => removeTask(index)}>×</button></div>{pickingIcon === index && <div className="icon-picker" aria-label={`Choose icon for ${task.name}`}>{iconOptions.map((icon) => <button key={icon} className={task.icon === icon ? "selected" : ""} aria-label={`Use ${icon} for ${task.name}`} onClick={() => { chooseTaskIcon(index, icon); setPickingIcon(null); }}>{icon}</button>)}<div className="custom-icon"><input aria-label={`Custom emoji for ${task.name}`} placeholder="⌃⌘Space for any emoji" value={customIcon} onChange={(event) => setCustomIcon(event.target.value)} /><button disabled={!customIcon.trim()} onClick={() => { chooseTaskIcon(index, customIcon.trim()); setPickingIcon(null); setCustomIcon(""); }}>USE</button></div></div>}</div>)}</div><button className="add-task" disabled={rings[editingRing].tasks.length >= 12} onClick={addTask}>+ ADD TASK</button><button className="editor-save" onClick={() => setShowEditor(false)}>SAVE CHANGES</button></div></div>}
+    {showEditor && <div className="sheet editor-sheet" onClick={() => setShowEditor(false)}><div onClick={(e) => e.stopPropagation()}><div className="editor-head"><span>EDIT YOUR TASKS</span><button aria-label="Close task editor" onClick={() => setShowEditor(false)}>×</button></div><h2>Keep the cycle yours.</h2><div className="ring-tabs">{rings.map((ring, index) => <button key={ring.cadence} className={editingRing === index ? "selected" : ""} onClick={() => { setEditingRing(index); setPickingIcon(null); }}>{ring.label}</button>)}</div><p className="editor-rule">Tap an icon to choose another · {rings[editingRing].tasks.length} of 12 tasks</p><div className="editor-list">{rings[editingRing].tasks.map((task, index) => <div className="editor-task" key={`${rings[editingRing].cadence}-${index}`}><div className="editor-row"><button className="editor-icon" aria-label={`Change icon for ${task.name}`} onClick={() => { setPickingIcon(pickingIcon === index ? null : index); setCustomIcon(""); }}>{task.icon}</button><input aria-label={`${rings[editingRing].label} task ${index + 1}`} maxLength={24} value={task.name} onChange={(event) => updateTaskName(index, event.target.value)} /><button aria-label={`Remove ${task.name}`} disabled={rings[editingRing].tasks.length <= 3} onClick={() => removeTask(index)}>×</button></div>{pickingIcon === index && <div className="icon-picker" aria-label={`Choose icon for ${task.name}`}>{iconOptions.map((icon) => <button key={icon} className={task.icon === icon ? "selected" : ""} aria-label={`Use ${icon} for ${task.name}`} onClick={() => { chooseTaskIcon(index, icon); setPickingIcon(null); }}>{icon}</button>)}<div className="custom-icon"><input aria-label={`Custom emoji for ${task.name}`} placeholder="Choose another emoji" value={customIcon} onChange={(event) => setCustomIcon(event.target.value)} /><button disabled={!customIcon.trim()} onClick={() => { chooseTaskIcon(index, customIcon.trim()); setPickingIcon(null); setCustomIcon(""); }}>USE</button></div></div>}</div>)}</div><button className="add-task" disabled={rings[editingRing].tasks.length >= 12} onClick={addTask}>+ ADD TASK</button><button className="editor-save" onClick={() => setShowEditor(false)}>SAVE CHANGES</button></div></div>}
   </main>;
 }
 
